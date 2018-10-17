@@ -3,6 +3,7 @@
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
 
 #define motorPin1 5
 #define motorPin2 4 
@@ -14,7 +15,7 @@ const char* ssid = "";
 const char* password = "";
 
 #define stepOpen 0
-#define stepClosed 20000
+#define stepClosed -60000
 #define maxSpeed 1000.0
 #define maxAccel 1000.0
 
@@ -23,6 +24,7 @@ AccelStepper stepper1(HALFSTEP, motorPin1, motorPin3, motorPin2, motorPin4);
 ESP8266WebServer server(80);
 
 boolean motorsDisabled = false;
+boolean hold = false;
 
 String getStepperInfo() {
   String s = "Current Pos: " + String(stepper1.currentPosition());
@@ -37,40 +39,48 @@ String getStepperInfo() {
   return s;
 }
 
+void moveTo(long step, boolean relative = false) {
+  motorsDisabled = false;
+  if(relative) {
+    stepper1.move(step);
+  } else {
+    stepper1.moveTo(step);
+  }
+}
+
 void handleStepTo() {
   if(server.args() > 0 && server.hasArg("step")) {
     long step = server.arg("step").toInt();
-    if(server.hasArg("rel")) {
-      stepper1.move(step);
-      server.send(200, "text/plain", "Set relative pos to " + String(step));
-      return;
-    } else {
-      stepper1.moveTo(step);
-      server.send(200, "text/plain", "Set pos to " + String(step));
-      return;
-    }
+    boolean relative = server.hasArg("rel");
+    moveTo(step, relative);
+    String response = "Set pos to " + String(stepper1.targetPosition());
+    server.send(200, "text/plain", response);
+    return;
   }
   server.send(400, "text/plain", "Needs step arg");
 }
 
 void handleOpen() {
-  stepper1.moveTo(stepOpen);
+  moveTo(stepOpen);
   server.send(200, "text/plain", "Blinds opening.");
 }
 
 void handleClose() {
-  stepper1.moveTo(stepClosed);
+  moveTo(stepClosed);
   server.send(200, "text/plain", "Blinds closing.");
 }
 
 void handleDisableSteppers() {
   stepper1.disableOutputs();
+  Serial.println("Disable outputs");
   motorsDisabled = true;
   server.send(200, "text/plain", "Outputs disabled");
 }
 
 void handleEnableSteppers() {
+  hold = true;
   stepper1.enableOutputs();
+  Serial.println("Enable outputs");
   motorsDisabled = false;
   server.send(200, "text/plain", "Outputs enabled");
 }
@@ -81,7 +91,8 @@ void handleStop() {
 }
 
 void handleResetPos() {
-  stepper1.setCurrentPosition(stepper1.currentPosition());
+  stepper1.setCurrentPosition(0);
+  moveTo(stepper1.currentPosition(), false);
   server.send(200, "text/plain", "Stepper position reset. Current pos is now new 0.");
 }
 
@@ -110,7 +121,7 @@ void handleSetAcceleration() {
     long accel = server.arg("accel").toInt();
     if(accel > 0 && accel <= (long) maxAccel) {
       stepper1.setAcceleration(accel);
-      server.send(200, "text/plain", "Set acceleration to " + String(accel));
+      server.send(200, "text/plain", "Set acceleration to " + String(accel)); 
       return;
     } else {
       server.send(400, "text/plain", "Acceleration must be higher than 0.0, and lower than" + String(maxAccel));
@@ -119,6 +130,41 @@ void handleSetAcceleration() {
   }
   server.send(400, "text/plain", "Needs speed arg"); 
 }
+
+void setupOTA() {
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_SPIFFS
+      type = "filesystem";
+    }
+
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  ArduinoOTA.begin();
+}
+
 void setup() {  
   pinMode(LED, OUTPUT);
   stepper1.setMaxSpeed(maxSpeed);
@@ -146,6 +192,7 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
   
+  setupOTA();
   if (MDNS.begin("esp8266")) {
     Serial.println("MDNS responder started");
   }
@@ -159,6 +206,7 @@ void setup() {
   server.on("/enable", handleEnableSteppers);
   server.on("/stop", handleStop);
   server.on("/reset", handleResetPos);
+  server.on("/accel", handleSetAcceleration);
   server.on("/info", []() {
     server.send(200, "text/plain", getStepperInfo());
   });
@@ -169,12 +217,16 @@ void setup() {
 }//--(end setup )---
 
 void loop() {
+  ArduinoOTA.handle();
   server.handleClient();
   
-  //Turn off motors when stopping
-  if (stepper1.distanceToGo() == 0) {
+ 
+  stepper1.run();
+
+   //Turn off motors when stopping
+  if (stepper1.distanceToGo() == 0 && hold == false && motorsDisabled == false) {
     stepper1.disableOutputs();
+    Serial.println("Disable outputs");
     motorsDisabled = true;
   }
-  stepper1.run();
 }
