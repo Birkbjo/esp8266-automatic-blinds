@@ -11,13 +11,15 @@
 #define motorPin4 12
 #define HALFSTEP 8
 #define LED 2
+#define endStopPin 13
+
 const char* ssid = "";
 const char* password = "";
 
 #define stepOpen 0
-#define stepClosed -60000
+#define stepClosed -50000
 #define maxSpeed 1000.0
-#define maxAccel 1000.0
+#define maxAccel 4000.0
 
 // Initialize with pin sequence IN1-IN3-IN2-IN4 for using the AccelStepper with 28BYJ-48
 AccelStepper stepper1(HALFSTEP, motorPin1, motorPin3, motorPin2, motorPin4);
@@ -25,7 +27,9 @@ ESP8266WebServer server(80);
 
 boolean motorsDisabled = false;
 boolean hold = false;
-
+//Endstop is at stepOpen position
+volatile boolean ENDSTOP1_ACTIVE = false;
+ 
 String getStepperInfo() {
   String s = "Current Pos: " + String(stepper1.currentPosition());
   s += "\n";
@@ -40,6 +44,11 @@ String getStepperInfo() {
 }
 
 void moveTo(long step, boolean relative = false) {
+  //Do not go higher than StepOpen, as we are at endstop
+  if(ENDSTOP1_ACTIVE && step > stepOpen) {
+    Serial.println("AT ENDSTOP, not going beyond STEPOPEN");
+    return;
+  }
   motorsDisabled = false;
   if(relative) {
     stepper1.move(step);
@@ -92,7 +101,6 @@ void handleStop() {
 
 void handleResetPos() {
   stepper1.setCurrentPosition(0);
-  moveTo(stepper1.currentPosition(), false);
   server.send(200, "text/plain", "Stepper position reset. Current pos is now new 0.");
 }
 
@@ -107,7 +115,7 @@ void handleSetSpeed() {
   if(server.args() > 0 && server.hasArg("speed")) {
     long speed = server.arg("speed").toInt();
     if(speed <= (long) maxSpeed) {
-      stepper1.setSpeed(speed);
+      stepper1.setMaxSpeed(speed);
       server.send(200, "text/plain", "Set speed to " + String(speed));
     } else {
       server.send(400, "text/plain", "Speed cannot be higher than maxSpeed: " + String(maxSpeed));
@@ -165,10 +173,33 @@ void setupOTA() {
   ArduinoOTA.begin();
 }
 
+void endstopISR() {
+   static unsigned long last_interrupt_time = 0;
+   unsigned long interrupt_time = millis();
+   boolean newEndStopVal = digitalRead(endStopPin);
+
+    // If (changed) interrupts come faster than 100ms, assume it's a bounce and ignore
+    // We only care about the interrupt if its different than before
+    // By only updating last_interrupt_time when we have had a change,
+     //we tend to just capture the first change in the read value, and bounce the other "floating" changes
+
+   if (ENDSTOP1_ACTIVE != newEndStopVal && interrupt_time - last_interrupt_time > 100) {
+      ENDSTOP1_ACTIVE = newEndStopVal;
+      
+      if(ENDSTOP1_ACTIVE) {
+        stepper1.setCurrentPosition(0);
+      }
+      last_interrupt_time = interrupt_time;
+   }
+}
+
 void setup() {  
   pinMode(LED, OUTPUT);
+  pinMode(endStopPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(endStopPin), endstopISR, CHANGE);
+
   stepper1.setMaxSpeed(maxSpeed);
-  stepper1.setAcceleration(100.0);
+  stepper1.setAcceleration(400.0);
   stepper1.setSpeed(700);
 
   digitalWrite(LED, LOW);
@@ -216,17 +247,20 @@ void setup() {
   Serial.println("HTTP server started");
 }//--(end setup )---
 
-void loop() {
-  ArduinoOTA.handle();
-  server.handleClient();
-  
- 
+void runMotors() {
   stepper1.run();
 
-   //Turn off motors when stopping
+  //Turn off motors when stopping
+  //This needs to be after .run() to catch initial targetPosition
   if (stepper1.distanceToGo() == 0 && hold == false && motorsDisabled == false) {
     stepper1.disableOutputs();
     Serial.println("Disable outputs");
     motorsDisabled = true;
   }
+}
+
+void loop() {
+  ArduinoOTA.handle();
+  server.handleClient();
+  runMotors();
 }
