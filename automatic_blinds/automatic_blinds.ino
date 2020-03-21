@@ -5,16 +5,16 @@
 #include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
 
-#define motorPin1 5
-#define motorPin2 4 
-#define motorPin3 14
-#define motorPin4 12
+#define motorPin1 14 //5
+#define motorPin2 12//4 
+#define motorPin3 13// 14
+#define motorPin4 15//12
 #define HALFSTEP 8
 #define LED 2
-#define endStopPin 13
+#define endStopPin 5
 
 const char* ssid = "";
-const char* password = "";
+const char* password = ";
 
 #define stepOpen 0
 #define stepClosed -50000
